@@ -11,7 +11,7 @@
 
 // Set your N-gram context length here
 // For N=6, the context length is 5 (it looks at 5 letters to guess the 6th).
-const size_t CONTEXT_LEN = 4; 
+const size_t CONTEXT_LEN = 8; 
 
 const std::vector<std::string> alphabet = {
     "a","b","c","d","e","f","g","h","i","j","k","l","m",
@@ -110,48 +110,55 @@ std::string generate(const NgramMap& ngram_distr, size_t length) {
     std::string result = c1;
     std::string current_context = c1;
 
-    // YOUR NOISE LEVER: Adjust this to make the text more or less crazy!
-    // 0.0 = strict memorization.
-    double NOISE_LEVEL = 0.01;
+    // YOUR NOISE LEVER: Now represents a direct % chance to randomly drop context.
+    // 0.0 = strict memorization. 0.05 = 5% chance to force a new path.
+    double NOISE_LEVEL = 0.1; 
     
-    //noise attenuation
-    NOISE_LEVEL = NOISE_LEVEL*NOISE_LEVEL;
-        
-    // 1. Fill with evenly distributed noise based on the slider
-    double base_noise = NOISE_LEVEL / alphabet.size();
-    ProbVector combined_probs(alphabet.size(), base_noise);
+    // A dice roller to see if we trigger the "forgetfulness"
+    std::uniform_real_distribution<double> chance(0.0, 1.0);
 
     for (size_t i = 1; i < length; ++i) {
-        // 1. ADDITIVE SMOOTHING: Start with a baseline probability for EVERY character
-        ProbVector combined_probs(alphabet.size(), NOISE_LEVEL); 
-        
         std::string search_key = current_context;
 
-        // 2. THE ELASTIC BACKOFF: Try to find the longest matching context
+        // 1. STOCHASTIC TRUNCATION (The New Noise)
+        // Roll the dice! If we hit the noise level, drop the oldest character.
+        // The while loop means there's a tiny chance it drops multiple characters.
+        while (!search_key.empty() && chance(gen) < NOISE_LEVEL) {
+            search_key = search_key.substr(utf8_char_len(search_key, 0));
+        }
+
+        ProbVector combined_probs(alphabet.size(), 0.0);
+        bool found_match = false;
+
+        // 2. THE ELASTIC BACKOFF (Standard lookup & self-healing)
         while (!search_key.empty()) {
             auto it = ngram_distr.find(search_key);
             
             if (it != ngram_distr.end()) {
-                // We found a match! Add the trained probabilities on top of the noise
-                for (size_t k = 0; k < alphabet.size(); ++k) {
-                    // Give trained data higher weight so it overrides the noise
-                    combined_probs[k] += (it->second[k] * (1.0 - std::log(NOISE_LEVEL+1))); 
-                }
+                // We found a match! Because there is no additive noise, 
+                // we just grab the pure trained data.
+                combined_probs = it->second; 
+                found_match = true;
                 break; // Stop shrinking the context, we found our anchor!
             }
             // If unseen, shrink the search key by dropping the oldest UTF-8 character
             search_key = search_key.substr(utf8_char_len(search_key, 0));
         }
 
-        // 3. Pick the next character using our combined noise + trained data
+        // 3. FALLBACK: If the context emptied out completely (rare, but possible)
+        if (!found_match) {
+            std::uniform_int_distribution<int> random_char(0, alphabet.size() - 1);
+            combined_probs[random_char(gen)] = 1.0; 
+        }
+
+        // 4. Pick the next character using our probabilities
         std::discrete_distribution<int> dist(combined_probs.begin(), combined_probs.end());
         std::string next_char = index_to_char[dist(gen)];
         
         result += next_char;
         current_context += next_char;
 
-        // 4. Keep the running context from growing larger than CONTEXT_LEN
-        // (If the number of bytes is larger than expected, we know we have to drop characters)
+        // 5. Keep the running context from growing larger than CONTEXT_LEN
         auto ctx_chars = utf8_split(current_context);
         if (ctx_chars.size() > CONTEXT_LEN) {
             current_context = current_context.substr(utf8_char_len(current_context, 0));
@@ -178,9 +185,32 @@ int main(int argc, char const *argv[])
     std::string text;
     std::string line;
     while (std::getline(file, line)) {
+        if (line.empty()) continue; // Skip totally blank lines!
+        
         for (char &c : line) c = std::tolower(static_cast<unsigned char>(c));
-        text += line + " "; 
+        
+        // Only add a space if the text doesn't already end with one
+        if (!text.empty() && text.back() != ' ') {
+            text += " ";
+        }
+        text += line; 
     }
+
+    // Crush all consecutive spaces/tabs/newlines into a single space
+    std::string cleaned_text;
+    bool in_space = false;
+    for (char c : text) {
+        if (std::isspace(static_cast<unsigned char>(c))) {
+            if (!in_space) {
+                cleaned_text += ' ';
+                in_space = true;
+            }
+        } else {
+            cleaned_text += c;
+            in_space = false;
+        }
+    }
+    text = cleaned_text;
 
     NgramMap ngram_distr;
     train(ngram_distr, text);
