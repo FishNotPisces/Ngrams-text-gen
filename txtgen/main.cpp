@@ -9,7 +9,7 @@
 #include <codecvt>
 #include <cctype>
 
-// Set your N-gram context length here!
+// Set your N-gram context length here
 // For N=6, the context length is 5 (it looks at 5 letters to guess the 6th).
 const size_t CONTEXT_LEN = 4; 
 
@@ -19,6 +19,8 @@ const std::vector<std::string> alphabet = {
     " ",".","!",",","?",";",":",
     "à","è","é","ì","ò","ù","_","\"","\'"
 };
+
+
 
 std::unordered_map<std::string, int> char_to_index;
 std::vector<std::string> index_to_char;
@@ -59,34 +61,36 @@ std::vector<std::string> utf8_split(const std::string& str) {
 // Train N-gram model
 void train(NgramMap& ngram_distr, const std::string& text) {
     auto chars = utf8_split(text);
-    size_t A = alphabet.size();
-
-    if (chars.size() <= CONTEXT_LEN) return;
-
-    for (size_t i = CONTEXT_LEN; i < chars.size(); ++i) {
-        // Check if the target character is in our alphabet
-        auto it_next = char_to_index.find(chars[i]);
-        if (it_next == char_to_index.end()) continue;
-
-        // Build the dynamic key (e.g., last 5 characters)
-        bool valid = true;
-        std::string key = "";
-        for (size_t j = i - CONTEXT_LEN; j < i; ++j) {
-            if (char_to_index.find(chars[j]) == char_to_index.end()) {
-                valid = false;
-                break;
-            }
-            key += chars[j];
+    
+    // --- 1. DYNAMIC ALPHABET BUILDER ---
+    for (const auto& c : chars) {
+        // If we haven't seen this character before, add it to our maps!
+        if (char_to_index.find(c) == char_to_index.end()) {
+            char_to_index[c] = index_to_char.size();
+            index_to_char.push_back(c);
         }
+    }
+    size_t A = index_to_char.size();
 
-        // If the whole sequence is valid, record it!
-        if (valid) {
+    // Start from index 1, looking backwards to build the context
+    for (size_t i = 1; i < chars.size(); ++i) {
+        auto it_next = char_to_index.find(chars[i]);
+        if (it_next == char_to_index.end()) continue; // skip invalid characters
+
+        std::string key = "";
+        
+        // Look backwards to store 1-grams, 2-grams, up to CONTEXT_LEN-grams
+        for (int j = i - 1; j >= 0 && (i - j) <= CONTEXT_LEN; --j) {
+            key = chars[j] + key; // prepend character to the key
+            
             if (ngram_distr.find(key) == ngram_distr.end())
                 ngram_distr[key] = ProbVector(A, 0.0);
+                
             ngram_distr[key][it_next->second] += 1.0;
         }
     }
 
+    // Normalize probabilities
     for (auto& [key, vec] : ngram_distr) {
         double sum = std::accumulate(vec.begin(), vec.end(), 0.0);
         if (sum > 0)
@@ -96,43 +100,62 @@ void train(NgramMap& ngram_distr, const std::string& text) {
 
 // Generate text from N-gram model
 std::string generate(const NgramMap& ngram_distr, size_t length) {
-    if (length <= CONTEXT_LEN || ngram_distr.empty()) return "";
+    if (length < 1 || ngram_distr.empty()) return "";
 
     std::random_device rd;
     std::mt19937 gen(rd());
 
-    // --- MATRIX SLICE IDEA (Fully Dynamic) ---
+    // Start with a single random character from the alphabet
     std::string c1 = index_to_char[std::uniform_int_distribution<int>(0, alphabet.size() - 1)(gen)];
-    
-    std::vector<std::string> matching_keys;
-    for (const auto& [k, v] : ngram_distr) {
-        if (k.substr(0, c1.size()) == c1) {
-            matching_keys.push_back(k);
-        }
-    }
-    
-    std::string key = matching_keys.empty() ? ngram_distr.begin()->first 
-                    : matching_keys[std::uniform_int_distribution<size_t>(0, matching_keys.size() - 1)(gen)];
-    
-    std::string result = key;
+    std::string result = c1;
+    std::string current_context = c1;
 
-    for (size_t i = CONTEXT_LEN; i < length; ++i) {
-        auto it = ngram_distr.find(key);
+    // YOUR NOISE LEVER: Adjust this to make the text more or less crazy!
+    // 0.0 = strict memorization.
+    double NOISE_LEVEL = 0.01;
+    
+    //noise attenuation
+    NOISE_LEVEL = NOISE_LEVEL*NOISE_LEVEL;
         
-        if (it == ngram_distr.end()) {
-            auto random_it = std::next(ngram_distr.begin(), std::uniform_int_distribution<size_t>(0, ngram_distr.size() - 1)(gen));
-            key = random_it->first;
-            it = ngram_distr.find(key); 
+    // 1. Fill with evenly distributed noise based on the slider
+    double base_noise = NOISE_LEVEL / alphabet.size();
+    ProbVector combined_probs(alphabet.size(), base_noise);
+
+    for (size_t i = 1; i < length; ++i) {
+        // 1. ADDITIVE SMOOTHING: Start with a baseline probability for EVERY character
+        ProbVector combined_probs(alphabet.size(), NOISE_LEVEL); 
+        
+        std::string search_key = current_context;
+
+        // 2. THE ELASTIC BACKOFF: Try to find the longest matching context
+        while (!search_key.empty()) {
+            auto it = ngram_distr.find(search_key);
+            
+            if (it != ngram_distr.end()) {
+                // We found a match! Add the trained probabilities on top of the noise
+                for (size_t k = 0; k < alphabet.size(); ++k) {
+                    // Give trained data higher weight so it overrides the noise
+                    combined_probs[k] += (it->second[k] * (1.0 - std::log(NOISE_LEVEL+1))); 
+                }
+                break; // Stop shrinking the context, we found our anchor!
+            }
+            // If unseen, shrink the search key by dropping the oldest UTF-8 character
+            search_key = search_key.substr(utf8_char_len(search_key, 0));
         }
 
-        std::discrete_distribution<int> dist(it->second.begin(), it->second.end());
-        int next_idx = dist(gen);
-
-        std::string next_char = index_to_char[next_idx];
+        // 3. Pick the next character using our combined noise + trained data
+        std::discrete_distribution<int> dist(combined_probs.begin(), combined_probs.end());
+        std::string next_char = index_to_char[dist(gen)];
+        
         result += next_char;
+        current_context += next_char;
 
-        // Our earlier bug fix handles shifting the N-length key perfectly!
-        key = key.substr(utf8_char_len(key, 0)) + next_char;
+        // 4. Keep the running context from growing larger than CONTEXT_LEN
+        // (If the number of bytes is larger than expected, we know we have to drop characters)
+        auto ctx_chars = utf8_split(current_context);
+        if (ctx_chars.size() > CONTEXT_LEN) {
+            current_context = current_context.substr(utf8_char_len(current_context, 0));
+        }
     }
 
     return result;
