@@ -31,6 +31,9 @@ Tweaking the memory length and the training data yields wildly different results
 1. Clone the repository to your local machine.
 2. Compile the C++ file using a modern compiler:
    ```bash
-   g++ main.cpp -o ngram_gen -O3 -std=c++17```
+   g++ main.cpp -o ngram_gen -O3 -std=c++17
+   ```
 3. Run the executable, passing your training text file as an argument:
+   ```bash
    ./ngram_gen your_training_data.txt
+   ```
