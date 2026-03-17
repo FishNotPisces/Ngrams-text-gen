@@ -5,36 +5,25 @@
 #include <vector>
 #include <random>
 #include <numeric>
-#include <locale>
-#include <codecvt>
 #include <cctype>
 
 // Set your N-gram context length here
-// For N=6, the context length is 5 (it looks at 5 letters to guess the 6th).
-const size_t CONTEXT_LEN = 8; 
+// For N=8, the context length is 8 (it looks at 8 letters to guess the 9th).
+const size_t CONTEXT_LEN = 10;
 
-const std::vector<std::string> alphabet = {
-    "a","b","c","d","e","f","g","h","i","j","k","l","m",
-    "n","o","p","q","r","s","t","u","v","w","x","y","z",
-    " ",".","!",",","?",";",":",
-    "à","è","é","ì","ò","ù","_","\"","\'"
-};
+// NOISE LEVER: 0.1 = 10% chance to randomly drop context and pivot
+const double NOISE_LEVEL = 0.5;
 
+const int OUTPUT_LENGTH = 2000;
 
-
+// Dynamic alphabet storage
 std::unordered_map<std::string, int> char_to_index;
 std::vector<std::string> index_to_char;
 
 using ProbVector = std::vector<double>;
 using NgramMap = std::unordered_map<std::string, ProbVector>;
 
-void init_alphabet() {
-    for (size_t i = 0; i < alphabet.size(); ++i) {
-        char_to_index[alphabet[i]] = i;
-        index_to_char.push_back(alphabet[i]);
-    }
-}
-
+// --- UTF-8 Helper Functions ---
 size_t utf8_char_len(const std::string& str, size_t pos) {
     unsigned char c = str[pos];
     if ((c & 0x80) == 0) return 1;
@@ -58,13 +47,12 @@ std::vector<std::string> utf8_split(const std::string& str) {
     return chars;
 }
 
-// Train N-gram model
+// --- Training Function ---
 void train(NgramMap& ngram_distr, const std::string& text) {
     auto chars = utf8_split(text);
     
-    // --- 1. DYNAMIC ALPHABET BUILDER ---
+    // 1. DYNAMIC ALPHABET BUILDER
     for (const auto& c : chars) {
-        // If we haven't seen this character before, add it to our maps!
         if (char_to_index.find(c) == char_to_index.end()) {
             char_to_index[c] = index_to_char.size();
             index_to_char.push_back(c);
@@ -72,16 +60,15 @@ void train(NgramMap& ngram_distr, const std::string& text) {
     }
     size_t A = index_to_char.size();
 
-    // Start from index 1, looking backwards to build the context
+    // 2. Build the N-gram context maps
     for (size_t i = 1; i < chars.size(); ++i) {
         auto it_next = char_to_index.find(chars[i]);
-        if (it_next == char_to_index.end()) continue; // skip invalid characters
+        if (it_next == char_to_index.end()) continue;
 
         std::string key = "";
         
-        // Look backwards to store 1-grams, 2-grams, up to CONTEXT_LEN-grams
         for (int j = i - 1; j >= 0 && (i - j) <= CONTEXT_LEN; --j) {
-            key = chars[j] + key; // prepend character to the key
+            key = chars[j] + key; 
             
             if (ngram_distr.find(key) == ngram_distr.end())
                 ngram_distr[key] = ProbVector(A, 0.0);
@@ -90,7 +77,7 @@ void train(NgramMap& ngram_distr, const std::string& text) {
         }
     }
 
-    // Normalize probabilities
+    // 3. Normalize probabilities
     for (auto& [key, vec] : ngram_distr) {
         double sum = std::accumulate(vec.begin(), vec.end(), 0.0);
         if (sum > 0)
@@ -98,60 +85,53 @@ void train(NgramMap& ngram_distr, const std::string& text) {
     }
 }
 
-// Generate text from N-gram model
+// --- Generation Function ---
 std::string generate(const NgramMap& ngram_distr, size_t length) {
     if (length < 1 || ngram_distr.empty()) return "";
 
     std::random_device rd;
     std::mt19937 gen(rd());
+    
+    size_t A = index_to_char.size(); // Use dynamic alphabet size
 
     // Start with a single random character from the alphabet
-    std::string c1 = index_to_char[std::uniform_int_distribution<int>(0, alphabet.size() - 1)(gen)];
+    std::string c1 = index_to_char[std::uniform_int_distribution<int>(0, A - 1)(gen)];
     std::string result = c1;
     std::string current_context = c1;
 
-    // YOUR NOISE LEVER: Now represents a direct % chance to randomly drop context.
-    // 0.0 = strict memorization. 0.05 = 5% chance to force a new path.
-    double NOISE_LEVEL = 0.1; 
-    
-    // A dice roller to see if we trigger the "forgetfulness"
+
     std::uniform_real_distribution<double> chance(0.0, 1.0);
 
     for (size_t i = 1; i < length; ++i) {
         std::string search_key = current_context;
 
-        // 1. STOCHASTIC TRUNCATION (The New Noise)
-        // Roll the dice! If we hit the noise level, drop the oldest character.
-        // The while loop means there's a tiny chance it drops multiple characters.
+        // 1. STOCHASTIC TRUNCATION (The ADHD Machine)
         while (!search_key.empty() && chance(gen) < NOISE_LEVEL) {
             search_key = search_key.substr(utf8_char_len(search_key, 0));
         }
 
-        ProbVector combined_probs(alphabet.size(), 0.0);
+        ProbVector combined_probs(A, 0.0);
         bool found_match = false;
 
-        // 2. THE ELASTIC BACKOFF (Standard lookup & self-healing)
+        // 2. THE ELASTIC BACKOFF
         while (!search_key.empty()) {
             auto it = ngram_distr.find(search_key);
             
             if (it != ngram_distr.end()) {
-                // We found a match! Because there is no additive noise, 
-                // we just grab the pure trained data.
                 combined_probs = it->second; 
                 found_match = true;
-                break; // Stop shrinking the context, we found our anchor!
+                break;
             }
-            // If unseen, shrink the search key by dropping the oldest UTF-8 character
             search_key = search_key.substr(utf8_char_len(search_key, 0));
         }
 
-        // 3. FALLBACK: If the context emptied out completely (rare, but possible)
+        // 3. FALLBACK
         if (!found_match) {
-            std::uniform_int_distribution<int> random_char(0, alphabet.size() - 1);
+            std::uniform_int_distribution<int> random_char(0, A - 1);
             combined_probs[random_char(gen)] = 1.0; 
         }
 
-        // 4. Pick the next character using our probabilities
+        // 4. Pick the next character
         std::discrete_distribution<int> dist(combined_probs.begin(), combined_probs.end());
         std::string next_char = index_to_char[dist(gen)];
         
@@ -168,13 +148,12 @@ std::string generate(const NgramMap& ngram_distr, size_t length) {
     return result;
 }
 
-int main(int argc, char const *argv[])
-{
+// --- Main Program ---
+int main(int argc, char const *argv[]) {
     if (argc < 2) {
         std::cerr << "Usage: " << argv[0] << " <text_file>" << std::endl;
         return 1;
     }
-    init_alphabet();
 
     std::ifstream file(argv[1]);
     if (!file) {
@@ -184,16 +163,12 @@ int main(int argc, char const *argv[])
 
     std::string text;
     std::string line;
+    
+    // Read file and convert to lowercase
     while (std::getline(file, line)) {
-        if (line.empty()) continue; // Skip totally blank lines!
-        
+        if (line.empty()) continue; 
         for (char &c : line) c = std::tolower(static_cast<unsigned char>(c));
-        
-        // Only add a space if the text doesn't already end with one
-        if (!text.empty() && text.back() != ' ') {
-            text += " ";
-        }
-        text += line; 
+        text += line + " "; 
     }
 
     // Crush all consecutive spaces/tabs/newlines into a single space
@@ -212,10 +187,11 @@ int main(int argc, char const *argv[])
     }
     text = cleaned_text;
 
+    // Train and generate
     NgramMap ngram_distr;
     train(ngram_distr, text);
 
-    std::string rtxt = generate(ngram_distr, 2000);
+    std::string rtxt = generate(ngram_distr, OUTPUT_LENGTH);
     std::cout << rtxt << std::endl;
 
     return 0;
