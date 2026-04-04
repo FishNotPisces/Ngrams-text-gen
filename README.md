@@ -1,39 +1,45 @@
-# Ngrams-text-gen
-Character level n-gram text generator based on input text learning
+# C++ N-Gram Generator (Attention & Serialization Branch)
 
-This small project sparked out of pure curiosity. I was wondering: *If I just generate characters one by one based on their probability of appearing in a real text, would the output actually look like natural language?*
+This is an experimental branch of the N-Gram Text Generator
 
-Starting with that simple idea, I began incrementally adding complexity. I moved from basic letter probabilities to N-grams (looking at the last N characters to predict the next), tackled UTF-8 parsing to handle multi-byte characters, and eventually implemented concepts like Additive Smoothing and Katz's Backoff to prevent the model from getting stuck in dead ends or just plagiarizing the training text.
+While the `main` branch contains a pure, procedural Markov Chain, this branch refactors the engine into an Object-Oriented pipeline, implements a custom "Attention" mechanism for creative text blending, and decouples the training and generation phases using raw binary serialization.
+
+## Key Features in this Branch
+
+* **Object-Oriented Design:** The core logic has been encapsulated into the `NgramEngine` class, isolating memory management and making the codebase highly modular.
+* **Primitive Attention Mechanism:** Instead of rigid exact-matching, the engine indexes context suffixes. If it gets stuck, it searches for structurally similar contexts and mathematically blends their probability vectors, resulting in fluid, dream-like hallucinations.
+* **Stochastic Truncation:** A built-in "noise" variable randomly chops the context window during generation, forcing the model to forget its history and jump to new, adjacent topics.
+* **Binary Serialization:** Training and generation are now completely separated. You can train a model once, save its "brain" directly to a `.dat` binary file, and load it into memory in milliseconds to generate text on demand.
 
 ## (IMPORTANT) AI-Assisted Workflow
 This repository was built relying heavily on AI generated code that had been then checked for correctness.
-I drove the logic, identified the mathematical bottlenecks (like overfitting and dead keys), conceptualized the fixes (like "matrix slicing" the initial seeds and injecting distance-based probability noise), directed the iterations, and wrote the initial rudimentary version of the program.
-**AI's Role:** I used an AI assistant to translate my logic and rough code into optimized, modern C++.
 
-## Features
-* **Dynamic Context Length:** Easily tweak how many characters the model remembers to control the balance between spelling accuracy and creative chaos.
-* **Robust UTF-8 Support:** Handles standard ASCII alongside multi-byte characters like accented letters without corrupting the memory strings.
-* **Backoff & Smoothing:** Injects distance-based noise to keep the text creative, but dynamically "backs off" to shorter memory sequences to instantly self-correct before the text degrades into pure gibberish.
+## Compiling the Project
 
-## Relevant Generated Outputs
-Tweaking the memory length and the training data yields wildly different results. Here are a few of my favorites from testing:
+Because the project is now decoupled, you need to compile two separate executables: one for training, and one for generating. The `-O3` flag is highly suggested.
 
-**"Fever Dream" (N=5, trained on a mashup of Wikipedia, Moby Dick, and Frankenstein):**
-> *"slang in that once and it undred part of sunlighten he glasses only cheek likely as were running, but quickly smile. it was flung on his earliest been skylarking..."*
+```bash
+# Compile the training executable
+g++ -O3 -std=c++17 train.cpp NgramEngine.cpp -o train_model
 
-**"Italian Simlish" (Trigram model trained on Italian text):**
-> *"za suovivito il tra ine, unaressiela so partanza fria dintavano di da inciabbame lendo che musciontembusi quel trava seggerva..."*
+# Compile the generator executable
+g++ -O3 -std=c++17 generate.cpp NgramEngine.cpp -o generate_text
+```
 
-**"Accidental Plagiarism" (N=10, trained on Pride and Prejudice):**
-> *"it was, moreover, including checks, online payments and credit card donations or connections, and in a prudential light it is certainly leave kent..."* (It memorized the modern Project Gutenberg copyright boilerplate and wove it into Jane Austen's prose)
+## How to use
 
-## How to Compile and Run
-1. Clone the repository to your local machine.
-2. Compile the C++ file using a modern compiler:
-   ```bash
-   g++ main.cpp -o ngram_gen -O3 -std=c++17
-   ```
-3. Run the executable, passing your training text file as an argument:
-   ```bash
-   ./ngram_gen your_training_data.txt
-   ```
+### Train model
+
+Feed a raw .txt file into the training executable. It will process the probabilities and output a binary .dat file.
+
+```bash
+./train_model input_text.txt my_model.dat
+```
+
+### Generate text
+
+Load your trained .dat file, specify how many characters you want to generate, and set the noise level (e.g., 0.1 for 10% chance of context truncation).
+
+```
+./generate_text my_model.dat 2000 0.1
+```

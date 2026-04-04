@@ -1,39 +1,119 @@
-#include <iostream>
-#include <fstream>
-#include <string>
-#include <unordered_map>
-#include <vector>
-#include <random>
-#include <numeric>
-#include <cctype>
+#include "NgramEngine.h"
+#include <cmath>      // For std::exp
+#include <algorithm>  // For std::min
 
-// Set your N-gram context length here
-// For N=8, the context length is 8 (it looks at 8 letters to guess the 9th).
-const size_t CONTEXT_LEN = 10;
-
-// NOISE LEVER: 0.1 = 10% chance to randomly drop context and pivot
-const double NOISE_LEVEL = 0.5;
-
-const int OUTPUT_LENGTH = 2000;
-
-// Dynamic alphabet storage
-std::unordered_map<std::string, int> char_to_index;
-std::vector<std::string> index_to_char;
-
+// Define our alias locally to keep the code clean
 using ProbVector = std::vector<double>;
-using NgramMap = std::unordered_map<std::string, ProbVector>;
+
+// --- Constructor ---
+NgramEngine::NgramEngine(size_t context_length) : CONTEXT_LEN(context_length) {}
+
+// --- Binary Helpers ---
+void NgramEngine::write_string(std::ofstream& out, const std::string& str) const {
+    size_t len = str.size();
+    out.write(reinterpret_cast<const char*>(&len), sizeof(size_t));
+    out.write(str.data(), len);
+}
+
+std::string NgramEngine::read_string(std::ifstream& in) const {
+    size_t len;
+    in.read(reinterpret_cast<char*>(&len), sizeof(size_t));
+    std::string str(len, '\0');
+    in.read(&str[0], len);
+    return str;
+}
+
+// --- Fast Binary Save ---
+bool NgramEngine::save_model(const std::string& filename) const {
+    std::ofstream out(filename, std::ios::binary);
+    if (!out) return false;
+
+    size_t A = index_to_char.size();
+    out.write(reinterpret_cast<const char*>(&A), sizeof(size_t));
+    for (const auto& c : index_to_char) write_string(out, c);
+
+    size_t map_size = char_to_index.size();
+    out.write(reinterpret_cast<const char*>(&map_size), sizeof(size_t));
+    for (const auto& [k, v] : char_to_index) {
+        write_string(out, k);
+        out.write(reinterpret_cast<const char*>(&v), sizeof(int));
+    }
+
+    size_t n_size = ngram_distr.size();
+    out.write(reinterpret_cast<const char*>(&n_size), sizeof(size_t));
+    for (const auto& [k, vec] : ngram_distr) {
+        write_string(out, k);
+        out.write(reinterpret_cast<const char*>(vec.data()), vec.size() * sizeof(double));
+    }
+
+    size_t s_size = suffix_map.size();
+    out.write(reinterpret_cast<const char*>(&s_size), sizeof(size_t));
+    for (const auto& [k, vec] : suffix_map) {
+        write_string(out, k);
+        size_t vec_len = vec.size();
+        out.write(reinterpret_cast<const char*>(&vec_len), sizeof(size_t));
+        for (const auto& s : vec) write_string(out, s);
+    }
+
+    return true;
+}
+
+// --- Fast Binary Load ---
+bool NgramEngine::load_model(const std::string& filename) {
+    std::ifstream in(filename, std::ios::binary);
+    if (!in) return false;
+
+    size_t A;
+    in.read(reinterpret_cast<char*>(&A), sizeof(size_t));
+    index_to_char.resize(A);
+    for (size_t i = 0; i < A; ++i) index_to_char[i] = read_string(in);
+
+    size_t map_size;
+    in.read(reinterpret_cast<char*>(&map_size), sizeof(size_t));
+    char_to_index.reserve(map_size);
+    for (size_t i = 0; i < map_size; ++i) {
+        std::string k = read_string(in);
+        int v;
+        in.read(reinterpret_cast<char*>(&v), sizeof(int));
+        char_to_index[k] = v;
+    }
+
+    size_t n_size;
+    in.read(reinterpret_cast<char*>(&n_size), sizeof(size_t));
+    ngram_distr.reserve(n_size);
+    for (size_t i = 0; i < n_size; ++i) {
+        std::string k = read_string(in);
+        std::vector<double> vec(A);
+        in.read(reinterpret_cast<char*>(vec.data()), A * sizeof(double));
+        ngram_distr[k] = vec;
+    }
+
+    size_t s_size;
+    in.read(reinterpret_cast<char*>(&s_size), sizeof(size_t));
+    suffix_map.reserve(s_size);
+    for (size_t i = 0; i < s_size; ++i) {
+        std::string k = read_string(in);
+        size_t vec_len;
+        in.read(reinterpret_cast<char*>(&vec_len), sizeof(size_t));
+        std::vector<std::string> vec(vec_len);
+        for (size_t j = 0; j < vec_len; ++j) vec[j] = read_string(in);
+        suffix_map[k] = vec;
+    }
+
+    return true;
+}
 
 // --- UTF-8 Helper Functions ---
-size_t utf8_char_len(const std::string& str, size_t pos) {
+size_t NgramEngine::utf8_char_len(const std::string& str, size_t pos) const {
     unsigned char c = str[pos];
     if ((c & 0x80) == 0) return 1;
     else if ((c & 0xE0) == 0xC0) return 2;
     else if ((c & 0xF0) == 0xE0) return 3;
     else if ((c & 0xF8) == 0xF0) return 4;
-    else return 1; 
+    else return 1;
 }
 
-std::vector<std::string> utf8_split(const std::string& str) {
+std::vector<std::string> NgramEngine::utf8_split(const std::string& str) const {
     std::vector<std::string> chars;
     for (size_t i = 0; i < str.size(); ) {
         unsigned char c = str[i];
@@ -47,27 +127,23 @@ std::vector<std::string> utf8_split(const std::string& str) {
     return chars;
 }
 
-// --- similarity function ---
-double calculate_similarity(const std::vector<std::string>& query, const std::vector<std::string>& key) {
+// --- Similarity Function ---
+double NgramEngine::calculate_similarity(const std::vector<std::string>& query, const std::vector<std::string>& key) const {
     double score = 0.0;
-    // Compare from right-to-left (end of string to beginning)
     int min_len = std::min(query.size(), key.size());
 
     for (int i = 1; i <= min_len; ++i) {
         if (query[query.size() - i] == key[key.size() - i]) {
-            // Give higher points for matches closer to the end
             score += (min_len - i + 1);
         }
     }
     return score;
 }
 
-// --- Training Function ---
-// NEW: Added suffix_map as a reference parameter so we can fill it up during training
-void train(NgramMap& ngram_distr, std::unordered_map<std::string, std::vector<std::string>>& suffix_map, const std::string& text) {
+// --- Training Function (OOP Fixed!) ---
+void NgramEngine::train(const std::string& text) {
     auto chars = utf8_split(text);
 
-    // 1. DYNAMIC ALPHABET BUILDER
     for (const auto& c : chars) {
         if (char_to_index.find(c) == char_to_index.end()) {
             char_to_index[c] = index_to_char.size();
@@ -76,7 +152,6 @@ void train(NgramMap& ngram_distr, std::unordered_map<std::string, std::vector<st
     }
     size_t A = index_to_char.size();
 
-    // 2. Build the N-gram context maps and the Suffix Index
     for (size_t i = 1; i < chars.size(); ++i) {
         auto it_next = char_to_index.find(chars[i]);
         if (it_next == char_to_index.end()) continue;
@@ -89,22 +164,16 @@ void train(NgramMap& ngram_distr, std::unordered_map<std::string, std::vector<st
             if (ngram_distr.find(key) == ngram_distr.end()) {
                 ngram_distr[key] = ProbVector(A, 0.0);
 
-                // ==========================================
-                // NEW: ATTENTION INDEXING
-                // If the key is at least 2 characters long, index its suffix
                 auto key_chars = utf8_split(key);
                 if (key_chars.size() >= 2) {
                     std::string suffix = key_chars[key_chars.size() - 2] + key_chars[key_chars.size() - 1];
                     suffix_map[suffix].push_back(key);
                 }
-                // ==========================================
             }
-
             ngram_distr[key][it_next->second] += 1.0;
         }
     }
 
-    // 3. Normalize probabilities
     for (auto& [key, vec] : ngram_distr) {
         double sum = std::accumulate(vec.begin(), vec.end(), 0.0);
         if (sum > 0)
@@ -112,60 +181,48 @@ void train(NgramMap& ngram_distr, std::unordered_map<std::string, std::vector<st
     }
 }
 
-// --- Generation Function ---
-// Note the new parameter: const std::unordered_map<std::string, std::vector<std::string>>& suffix_map
-std::string generate(const NgramMap& ngram_distr, const std::unordered_map<std::string, std::vector<std::string>>& suffix_map, size_t length) {
+// --- Generation Function (OOP Fixed!) ---
+std::string NgramEngine::generate(size_t length, double noise_level) const {
     if (length < 1 || ngram_distr.empty()) return "";
 
     std::random_device rd;
     std::mt19937 gen(rd());
 
-    size_t A = index_to_char.size(); // Use dynamic alphabet size
+    size_t A = index_to_char.size();
 
-    // Start with a single random character from the alphabet
     std::string c1 = index_to_char[std::uniform_int_distribution<int>(0, A - 1)(gen)];
     std::string result = c1;
     std::string current_context = c1;
 
-    double NOISE_LEVEL = 0.1;
     std::uniform_real_distribution<double> chance(0.0, 1.0);
 
     for (size_t i = 1; i < length; ++i) {
         std::string search_key = current_context;
 
-        // 1. STOCHASTIC TRUNCATION (The ADHD Machine)
-        while (!search_key.empty() && chance(gen) < NOISE_LEVEL) {
+        while (!search_key.empty() && chance(gen) < noise_level) {
             search_key = search_key.substr(utf8_char_len(search_key, 0));
         }
 
         ProbVector combined_probs(A, 0.0);
         bool found_match = false;
 
-        // ==========================================
-        // 2. THE ATTENTION MECHANISM (NEW!)
-        // ==========================================
         auto ctx_chars = utf8_split(search_key);
 
-        // Only attempt attention if we have enough characters for our 2-character suffix index
         if (ctx_chars.size() >= 2) {
             std::string suffix = ctx_chars[ctx_chars.size() - 2] + ctx_chars[ctx_chars.size() - 1];
 
-            // Check if our index has candidates ending in these two characters
             if (suffix_map.find(suffix) != suffix_map.end()) {
                 const auto& candidates = suffix_map.at(suffix);
                 double total_weight = 0.0;
 
-                // Score every candidate based on how similar it is to our current context
                 for (const std::string& candidate_key : candidates) {
                     auto cand_chars = utf8_split(candidate_key);
                     double score = calculate_similarity(ctx_chars, cand_chars);
 
-                    // Threshold: We only care if the context is highly similar (score > 2.0)
                     if (score > 2.0) {
-                        double weight = std::exp(score); // Exponentiate so best matches dominate
+                        double weight = std::exp(score);
                         total_weight += weight;
 
-                        // Blend this candidate's probabilities into our bucket
                         const ProbVector& candidate_probs = ngram_distr.at(candidate_key);
                         for (size_t k = 0; k < A; ++k) {
                             combined_probs[k] += (candidate_probs[k] * weight);
@@ -173,19 +230,15 @@ std::string generate(const NgramMap& ngram_distr, const std::unordered_map<std::
                     }
                 }
 
-                // If we found valid weights, normalize the bucket into proper percentages (0.0 to 1.0)
                 if (total_weight > 0.0) {
                     for (size_t k = 0; k < A; ++k) {
                         combined_probs[k] /= total_weight;
                     }
-                    found_match = true; // Success! We don't need the Backoff!
+                    found_match = true;
                 }
             }
         }
-        // ==========================================
 
-        // 3. THE ELASTIC BACKOFF (The Safety Net)
-        // If Attention failed to find anything similar, fall back to exact matching
         if (!found_match) {
             while (!search_key.empty()) {
                 auto it = ngram_distr.find(search_key);
@@ -199,20 +252,17 @@ std::string generate(const NgramMap& ngram_distr, const std::unordered_map<std::
             }
         }
 
-        // 4. FALLBACK (If everything fails)
         if (!found_match) {
             std::uniform_int_distribution<int> random_char(0, A - 1);
             combined_probs[random_char(gen)] = 1.0;
         }
 
-        // 5. Pick the next character using the blended probabilities
         std::discrete_distribution<int> dist(combined_probs.begin(), combined_probs.end());
         std::string next_char = index_to_char[dist(gen)];
 
         result += next_char;
         current_context += next_char;
 
-        // 6. Keep the running context from growing larger than CONTEXT_LEN
         auto ctx_chars_new = utf8_split(current_context);
         if (ctx_chars_new.size() > CONTEXT_LEN) {
             current_context = current_context.substr(utf8_char_len(current_context, 0));
@@ -220,57 +270,4 @@ std::string generate(const NgramMap& ngram_distr, const std::unordered_map<std::
     }
 
     return result;
-}
-
-// --- Main Program ---
-int main(int argc, char const *argv[]) {
-    if (argc < 2) {
-        std::cerr << "Usage: " << argv[0] << " <text_file>" << std::endl;
-        return 1;
-    }
-
-    std::ifstream file(argv[1]);
-    if (!file) {
-        std::cerr << "Failed to open file." << std::endl;
-        return 1;
-    }
-
-    std::string text;
-    std::string line;
-    
-    // Read file and convert to lowercase
-    while (std::getline(file, line)) {
-        if (line.empty()) continue; 
-        for (char &c : line) c = std::tolower(static_cast<unsigned char>(c));
-        text += line + " "; 
-    }
-
-    // Crush all consecutive spaces/tabs/newlines into a single space
-    std::string cleaned_text;
-    bool in_space = false;
-    for (char c : text) {
-        if (std::isspace(static_cast<unsigned char>(c))) {
-            if (!in_space) {
-                cleaned_text += ' ';
-                in_space = true;
-            }
-        } else {
-            cleaned_text += c;
-            in_space = false;
-        }
-    }
-    text = cleaned_text;
-    // Create our two brains
-    NgramMap ngram_distr;
-    std::unordered_map<std::string, std::vector<std::string>> suffix_map;
-
-    // Train the model (fills both ngram_distr and suffix_map)
-    train(ngram_distr, suffix_map, text);
-
-    // Generate the text using both maps
-    std::string rtxt = generate(ngram_distr, suffix_map, 2000);
-    std::cout << rtxt << std::endl;
-
-
-    return 0;
 }
