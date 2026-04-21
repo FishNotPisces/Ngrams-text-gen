@@ -45,7 +45,15 @@ int main(int argc, char const *argv[]) {
 
     // Boot up the engine (Context Length N=8)
     NgramEngine engine(8);
-    engine.train(cleaned_text);
+
+    // --- NEW: The Control Panel for Training ---
+    TrainingParams t_params;
+    t_params.enable_pruning = true;
+    t_params.prune_low_freq = 0.00005; // You can adjust your typo filter here!
+    t_params.prune_high_freq = 0.01;   // You can adjust your grammar glitch filter here!
+
+    // Pass the config struct into the engine
+    engine.train(cleaned_text, t_params);
 
     std::cout << "Training complete. Saving to binary file..." << std::endl;
     if (engine.save_model(output_file)) {

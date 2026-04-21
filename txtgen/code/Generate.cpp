@@ -20,10 +20,19 @@ int main(int argc, char const *argv[]) {
         return 1;
     }
 
+    // --- NEW: The Control Panel for Generation ---
+    GenerationParams g_params;
+    g_params.length = length;          // From argv[2]
+    g_params.noise_level = noise;      // From argv[3]
+    g_params.use_attention = true;     // Toggle your new suffix-blending on!
+    g_params.attention_threshold = 2.0; 
+
     std::cout << "Model loaded! Generating text..." << std::endl;
     std::cout << "-----------------------------------" << std::endl;
 
-    std::string output = engine.generate(length, noise);
+    // Pass the config struct instead of raw variables
+    std::string output = engine.generate(g_params);
+    
     std::cout << output << std::endl;
 
     return 0;
