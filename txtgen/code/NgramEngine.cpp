@@ -202,8 +202,7 @@ size_t NgramEngine::prune_graph(double low_freq, double high_freq, size_t total_
 }
 
 // --- Training Function (OOP Fixed!) ---
-void NgramEngine::train(const std::string& text, const TrainingParams& params) {
-    auto tokens = split_tokens(text);
+void NgramEngine::train(const std::vector<std::string>& tokens, const TrainingParams& params) {
 
     // =====================================================================
     // CYCLE 1: VOCABULARY BUILDING
@@ -238,19 +237,20 @@ void NgramEngine::train(const std::string& text, const TrainingParams& params) {
         // Expands the context backwards from length 1 up to CONTEXT_LEN.
         // This populates the N-gram distribution and the Attention suffix map.
         for (int j = i - 1; j >= 0 && (i - j) <= CONTEXT_LEN; --j) {
-            key = tokens[j] + key;
+            key = tokens[j] + key; // Concatenates perfectly!
 
             if (ngram_distr.find(key) == ngram_distr.end()) {
                 ngram_distr[key] = std::unordered_map<int, double>();
 
-                auto key_tokens = split_tokens(key);
-                if (key_tokens.size() >= 2) {
-                    // The suffix index relies on the last two tokens of the context
-                    std::string suffix = key_tokens[key_tokens.size() - 2] + key_tokens[key_tokens.size() - 1];
+                // NEW, BULLETPROOF SUFFIX LOGIC
+                // We only have a 2-token suffix if the context length (i - j) is >= 2
+                if ((i - j) >= 2) {
+                    // Grab the last two tokens directly from the raw array!
+                    std::string suffix = tokens[i - 2] + tokens[i - 1];
                     suffix_map[suffix].push_back(key);
                 }
             }
-            // Record the raw interaction count (Token ID -> Count)
+            // Record the raw interaction count
             ngram_distr[key][it_next->second] += 1.0;
         }
     }
@@ -351,84 +351,152 @@ bool NgramEngine::apply_attention(const std::string& search_key, std::unordered_
 std::string NgramEngine::generate(const GenerationParams& params) const {
     if (params.length < 1 || ngram_distr.empty()) return "";
 
+    double temperature = params.temperature; // Tweak this! Higher = more creative, lower = more repetitive
+    int K = params.K;
+
+    size_t CACHE_SIZE = 100;    // Remember the last 100 tokens
+    double CACHE_WEIGHT = 0.15; // 15% of the decision comes from the cache, 85% from the N-gram
+
+    std::deque<int> cache_window;
+    std::unordered_map<int, double> cache_counts;
+
     std::random_device rd;
     std::mt19937 gen(rd());
 
-    // Start with a random token
     int start_id = std::uniform_int_distribution<int>(0, id_to_token.size() - 1)(gen);
     std::string result = id_to_token[start_id];
-    std::string current_context = result;
+    
+    // THE FIX: Context is now managed as an array of whole tokens
+    std::vector<std::string> context_tokens;
+    context_tokens.push_back(result);
 
     std::uniform_real_distribution<double> chance(0.0, 1.0);
 
     for (size_t i = 1; i < params.length; ++i) {
-        std::string search_key = current_context;
+        
+        // We use a temporary copy of our context array for the back-off loop
+        std::vector<std::string> temp_context = context_tokens;
 
-        // ---------------------------------------------------------
-        // FEATURE 1: STOCHASTIC TRUNCATION (Toggleable via noise_level)
-        // ---------------------------------------------------------
-        while (!search_key.empty() && chance(gen) < params.noise_level) {
-            search_key = search_key.substr(utf8_char_len(search_key, 0));
+        // 1. STOCHASTIC TRUNCATION (Dropping whole tokens!)
+        while (!temp_context.empty() && chance(gen) < params.noise_level) {
+            temp_context.erase(temp_context.begin()); // Drop the oldest token
         }
 
-        // We now use a sparse map to hold our blended probabilities
         std::unordered_map<int, double> combined_probs;
         bool found_match = false;
 
-        // ---------------------------------------------------------
-        // FEATURE 2: THE ATTENTION MECHANISM (Toggleable via boolean)
-        // ---------------------------------------------------------
+        // 2. ATTENTION
         if (params.use_attention) {
-            found_match = apply_attention(search_key, combined_probs, params.attention_threshold);
+            // Build the string key from the current token array
+            std::string temp_key = "";
+            for (const auto& t : temp_context) temp_key += t;
+            found_match = apply_attention(temp_key, combined_probs, params.attention_threshold);
         }
 
-        // ---------------------------------------------------------
-        // CORE LOGIC: ELASTIC BACKOFF (Exact Match)
-        // ---------------------------------------------------------
+        // 3. ELASTIC BACKOFF
         if (!found_match) {
-            while (!search_key.empty()) {
-                auto it = ngram_distr.find(search_key);
+            while (!temp_context.empty()) {
+                // Build the string key from the current token array
+                std::string current_key = "";
+                for (const auto& t : temp_context) current_key += t;
+
+                auto it = ngram_distr.find(current_key);
                 if (it != ngram_distr.end() && !it->second.empty()) {
-                    combined_probs = it->second; // Copy the sparse map
+                    combined_probs = it->second;
                     found_match = true;
                     break;
                 }
-                search_key = search_key.substr(utf8_char_len(search_key, 0));
+                // Drop the oldest token to back-off safely
+                temp_context.erase(temp_context.begin()); 
             }
         }
 
-        // ---------------------------------------------------------
-        // FALLBACK: Completely Random Token
-        // ---------------------------------------------------------
+        // 4. FALLBACK
         if (!found_match) {
             std::uniform_int_distribution<int> random_token(0, id_to_token.size() - 1);
             combined_probs[random_token(gen)] = 1.0;
         }
 
-        // ---------------------------------------------------------
-        // SPARSE ROULETTE WHEEL
-        // ---------------------------------------------------------
-        // Separate the sparse map into candidates and weights
-        std::vector<int> candidates;
-        std::vector<double> weights;
-        for (const auto& [token_id, prob] : combined_probs) {
-            candidates.push_back(token_id);
-            weights.push_back(prob);
+        // 4.5. CACHE BOOST
+        if (!combined_probs.empty() && !cache_window.empty()) {
+            double current_cache_size = static_cast<double>(cache_window.size());
+
+            for (auto& [token_id, prob] : combined_probs) {
+                double cache_prob = 0.0;
+                
+                // If this legal next-word is also in our recent memory, calculate its cache frequency
+                if (cache_counts.find(token_id) != cache_counts.end()) {
+                    cache_prob = cache_counts[token_id] / current_cache_size;
+                }
+                
+                // Linear Interpolation: Blend the two minds together
+                prob = ((1.0 - CACHE_WEIGHT) * prob) + (CACHE_WEIGHT * cache_prob);
+            }
         }
 
-        // Roll the dice based on the weights
-        std::discrete_distribution<int> dist(weights.begin(), weights.end());
-        int selected_index = dist(gen);
-        int next_token_id = candidates[selected_index];
-        std::string next_token = id_to_token[next_token_id];
+        // 5. ROULETTE WHEEL (WITH TOP-K AND TEMPERATURE)
+        std::string next_token = "";
+        std::vector<int> candidates;
+        std::vector<double> weights;
 
+        if (!combined_probs.empty()) {
+            // 1. Move map to a vector of pairs so we can sort them by probability
+            std::vector<std::pair<int, double>> sorted_words(combined_probs.begin(), combined_probs.end());
+            
+            // 2. Sort descending (highest probability first)
+            std::sort(sorted_words.begin(), sorted_words.end(), 
+                      [](const auto& a, const auto& b) { return a.second > b.second; });
+                      
+            // 3. TOP-K FILTER: The Guillotine! Keep only the top K choices.
+            if (sorted_words.size() > K) {
+                sorted_words.resize(K); 
+            }
+
+            // 4. Build your candidates and apply Temperature Math
+            for (const auto& pair : sorted_words) {
+                candidates.push_back(pair.first);
+                double adjusted_weight = std::pow(pair.second, 1.0 / temperature);
+                weights.push_back(adjusted_weight);
+            }
+            
+            // 5. Roll the dice safely among the survivors
+            std::discrete_distribution<int> dist(weights.begin(), weights.end());
+            int next_token_id = candidates[dist(gen)];
+            next_token = id_to_token[next_token_id];
+            
+        } else {
+            // THE LIFEBOAT: We hit a dead end. 
+            next_token = ".</w>"; 
+            context_tokens.clear(); 
+        }
+
+        // Append to string ONCE, push to memory ONCE.
         result += next_token;
-        current_context += next_token;
+        context_tokens.push_back(next_token);
 
-        // Keep context within limits
-        auto ctx_tokens = split_tokens(current_context); // Using your generic token splitter
-        if (ctx_tokens.size() > CONTEXT_LEN) {
-            current_context = current_context.substr(utf8_char_len(current_context, 0));
+        // UPDATE CACHE
+        auto cache_it = token_to_id.find(next_token);
+        if (cache_it != token_to_id.end()) {
+            int final_token_id = cache_it->second;
+            
+            cache_window.push_back(final_token_id);
+            cache_counts[final_token_id] += 1.0;
+
+            // If the cache gets too big, forget the oldest word
+            if (cache_window.size() > CACHE_SIZE) {
+                int oldest_id = cache_window.front();
+                cache_window.pop_front();
+                
+                cache_counts[oldest_id] -= 1.0;
+                if (cache_counts[oldest_id] <= 0.0) {
+                    cache_counts.erase(oldest_id); // Keep the map clean and fast
+                }
+            }
+        }
+
+        // 6. KEEP CONTEXT WITHIN LIMITS (Limit by token count, not character count!)
+        if (context_tokens.size() > CONTEXT_LEN) {
+            context_tokens.erase(context_tokens.begin());
         }
     }
 

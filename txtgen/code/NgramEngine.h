@@ -6,12 +6,15 @@
 #include <fstream>
 #include <random>
 #include <numeric>
+#include <deque>
 
 struct GenerationParams {
     size_t length = 2000;
     double noise_level = 0.0;
     bool use_attention = false;      // Toggle Attention ON/OFF
-    double attention_threshold = 2.0; 
+    double attention_threshold = 2.0;
+    double temperature = 1.5; // Tweak this! Higher = more creative, lower = more repetitive
+    int K = 5;
 };
 
 struct TrainingParams {
@@ -48,9 +51,9 @@ private:
     std::string read_string(std::ifstream& in) const;
 
 public:
-    NgramEngine(size_t context_length = 8);
+    NgramEngine(size_t context_length = 4);
 
-    void train(const std::string& text, const TrainingParams& params = TrainingParams());
+    void train(const std::vector<std::string>& tokens, const TrainingParams& params = TrainingParams());
     std::string generate(const GenerationParams& params) const;
 
     bool save_model(const std::string& filename) const;
