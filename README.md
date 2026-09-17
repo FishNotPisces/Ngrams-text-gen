@@ -2,27 +2,25 @@
 
 This is the primary `main` branch of the N-Gram Text Generator.
 
-(Note: The original, purely procedural Markov Chain implementation has been archived to the `main-old` branch.)
+*(Note: The original procedural word-level Markov Chain implementation is archived in the `main-old` branch.)*
 
-This architecture features a highly optimized, Object-Oriented pipeline utilizing dynamic subword tokenization, Shannon Entropy heuristics, and a paragraph-streaming architecture.
+This version implements an object-oriented $n$-gram language model pipeline utilizing Byte Pair Encoding (BPE), entropy-based boundary detection, and a segregated paragraph-level training architecture.
 
-## Key Features
+## Architecture & Features
 
-* **Byte Pair Encoding (BPE):** Replaces rigid word-level tokens with dynamically merged subwords, allowing the engine to handle vast vocabularies and construct out-of-vocabulary words without memory bloat.
-* **Entropy-Based Preprocessor:** Mathematically deduces rigid punctuation joints using Shannon Entropy on bigram transitions, cleanly detaching formatting from word edges without hardcoded rules.
-* **Paragraph-Streaming Architecture:** The N-gram engine strictly isolates context windows within paragraph boundaries, preventing cross-paragraph statistical contamination and "ghost link" hallucinations.
-* **Elastic Backoff & Cache Boost:** When hitting a dead end, the engine gracefully shrinks its context window to find statistical anchors. A sliding 100-token memory cache simultaneously boosts the probability of recently used words to maintain long-range thematic coherence.
-* **Binary Serialization:** Training and generation are now completely separated. You can train a model once, save its "brain" directly to a `.dat` binary file, and load it into memory in milliseconds to generate text on demand.
+* **Byte Pair Encoding (BPE):** Tokenizes text into subword units rather than strict word boundaries. This limits the vocabulary size used by the transition matrix and allows unseen words to be represented as combinations of known subword units.
+* **Entropy-Based Preprocessor:** Calculates Shannon Entropy on character bigram transitions to identify structural boundaries (e.g., punctuation). Low-entropy symbols are dynamically detached from adjacent alphanumeric characters prior to tokenization, causing punctuation and other structural markers to be treated as separate tokens.
+* **Paragraph-Level Context Isolation:** The training ingestor processes text as discrete paragraph streams. The context window is constrained to paragraph boundaries to prevent the matrix from calculating transition probabilities across distinct text blocks.
+* **Elastic Backoff & Cache Interpolation:** During generation, if an $n$-gram context is absent from the distribution matrix, the engine progressively drops the oldest token to search shorter $n-1$ contexts. A sliding window cache interpolates localized probabilities to bias the selection toward recently generated tokens.
+* **Binary Serialization:** The probability distribution matrices and BPE vocabulary are serialized to a custom binary `.dat` format, separating the training phase from generation.
 
+## AI-Assisted Workflow
 
+This repository was developed with substantial assistance from AI-generated code, primarily during implementation and refactoring. Generated code was subsequently reviewed, modified, and tested during development.
 
-## (IMPORTANT) AI-Assisted Workflow
+## Compilation
 
-This repository was built relying heavily on AI generated code that had been then checked for correctness.
-
-## Compiling the Project
-
-Because the project is decoupled, you need to compile two separate executables: one for training, and one for generating. The `-O3` flag is highly suggested.
+The pipeline is separated into training and generation executables. Standard `-O3` optimization is recommended.
 
 ```bash
 # Compile the training executable
@@ -33,22 +31,30 @@ g++ -O3 -std=c++17 Generate.cpp NgramEngine.cpp -o generate_text
 
 ```
 
-## How to use
+## Usage
 
-### Train model
+### Training
 
-Feed a raw .txt file into the training executable. It will process the probabilities and output a binary .dat file.
+Processes a raw text corpus, computes subword and $n$-gram frequencies, normalizes the probability distributions, and serializes the state to a binary file.
 
 ```bash
 ./train_model input_text.txt my_model.dat
 
 ```
 
-### Generate text
+### Generation
 
-Load your trained .dat file, specify how many tokens you want to generate, and tune the Temperature (creativity) and Top-K (noise filtering) parameters.
+Loads the serialized model and generates text based on the computed distributions.
+
+**Arguments:** `<model_file> <length> <temperature> <top-k>`
+
+* `length`: Total number of tokens to generate.
+* `temperature`: Scales the probability distribution ($P^{1/T}$). Values $>1.0$ flatten the distribution; values $<1.0$ sharpen it.
+* `top-k`: Truncates the candidate list to the $K$ most probable tokens before sampling.
 
 ```bash
 ./generate_text my_model.dat 2000 1.5 5
 
 ```
+
+---
