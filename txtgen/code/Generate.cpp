@@ -42,14 +42,15 @@ void print_decoded(const std::string& raw_output) {
 
 
 int main(int argc, char const *argv[]) {
-    if (argc < 4) {
-        std::cerr << "Usage: " << argv[0] << " <model_file.dat> <length> <noise_level>" << std::endl;
+    if (argc < 5) {
+        std::cerr << "Usage: " << argv[0] << " <model_file.dat> <length> <temperature> <K>" << std::endl;
         return 1;
     }
 
     std::string model_file = argv[1];
     size_t length = std::stoul(argv[2]);
-    double noise = std::stod(argv[3]);
+    double temperature = std::stod(argv[3]);
+    int K = std::stoi(argv[4]);
 
     NgramEngine engine; // Context length doesn't matter here, it just needs to load
 
@@ -62,11 +63,8 @@ int main(int argc, char const *argv[]) {
     // --- NEW: The Control Panel for Generation ---
     GenerationParams g_params;
     g_params.length = length;          // From argv[2]
-    g_params.noise_level = noise;      // From argv[3]
-    g_params.use_attention = true;     // Toggle your new suffix-blending on!
-    g_params.attention_threshold = 2.0;
-    g_params.temperature = 1.5;       // Tweak this! Higher = more creative, lower = more repetitive
-    g_params.K = 5;
+    g_params.temperature = temperature;       // Tweak this! Higher = more creative, lower = more repetitive
+    g_params.K = K;
 
     std::cout << "Model loaded! Generating text..." << std::endl;
     std::cout << "-----------------------------------" << std::endl;

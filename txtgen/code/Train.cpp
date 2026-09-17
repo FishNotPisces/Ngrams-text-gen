@@ -1,21 +1,19 @@
 #include <iostream>
 #include <fstream>
 #include <cctype>
-#include "NgramEngine.h"
-
+#include <vector>
 #include <sstream>
-#include "BPETokenizer.h"
 
+#include "NgramEngine.h"
+#include "BPETokenizer.h"
 #include "Preprocessor.h"
 
-std::vector<std::string> build_training_sequence(const std::string& text_buffer, const BPETokenizer& tokenizer) {
-    std::unordered_map<std::string, std::list<std::string>> fast_lookup;
-    for (const auto& vw : tokenizer.get_dictionary()) {
-        std::string original_word = "";
-        for (const auto& t : vw.tokens) { original_word += t; }
-        fast_lookup[original_word] = vw.tokens;
-    }
-
+// --- HELPER FUNCTIONS (Unchanged) ---
+std::vector<std::string> build_training_sequence(
+    const std::string& text_buffer, 
+    const std::unordered_map<std::string, std::list<std::string>>& fast_lookup,
+    int& global_dropped) // Passed by reference
+{
     std::vector<std::string> chronological_sequence;
     std::istringstream stream(text_buffer);
     std::string word;
@@ -27,6 +25,8 @@ std::vector<std::string> build_training_sequence(const std::string& text_buffer,
             for (const auto& piece : it->second) {
                 chronological_sequence.push_back(piece);
             }
+        } else {
+            global_dropped++; // Add to the global tally
         }
     }
     return chronological_sequence;
@@ -34,9 +34,9 @@ std::vector<std::string> build_training_sequence(const std::string& text_buffer,
 
 void sanitize_text(std::string& text) {
     std::vector<std::pair<std::string, std::string>> replacements = {
-        {"“", "\""}, {"”", "\""},  // Smart double quotes to normal
-        {"‘", "'"},  {"’", "'"},   // Smart single quotes to normal
-        {"—", " - "}               // Em-dash to spaced hyphen
+        {"“", "\""}, {"”", "\""},  
+        {"‘", "'"},  {"’", "'"},   
+        {"—", " - "}               
     };
 
     for (const auto& [bad, good] : replacements) {
@@ -48,6 +48,8 @@ void sanitize_text(std::string& text) {
     }
 }
 
+
+// --- MAIN PIPELINE ---
 int main(int argc, char const *argv[]) {
     if (argc < 3) {
         std::cerr << "Usage: " << argv[0] << " <input_text_file> <output_model_file.dat>" << std::endl;
@@ -63,57 +65,95 @@ int main(int argc, char const *argv[]) {
         return 1;
     }
 
-    // Read and clean the text (your Ultimate Space Crusher logic)
-    std::string text;
+    // =========================================================
+    // PHASE 1: PARAGRAPH EXTRACTION & CLEANING
+    // =========================================================
+    std::vector<std::string> precleaned_paragraphs;
+    std::string current_paragraph = "";
     std::string line;
-    while (std::getline(file, line)) {
-        if (line.empty()) continue;
-        for (char &c : line) c = std::tolower(static_cast<unsigned char>(c));
-        text += line + " ";
-    }
 
-    std::string precleaned_text;
-    bool in_space = false;
-    for (char c : text) {
-        if (std::isspace(static_cast<unsigned char>(c))) {
-            if (!in_space) {
-                precleaned_text += ' ';
-                in_space = true;
+    while (std::getline(file, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+
+        // Empty line defines a paragraph boundary
+        if (line.empty() || line.find_first_not_of(" \t") == std::string::npos) {
+            if (!current_paragraph.empty()) {
+                precleaned_paragraphs.push_back(current_paragraph);
+                current_paragraph = "";
             }
         } else {
-            precleaned_text += c;
-            in_space = false;
+            for (char &c : line) c = std::tolower(static_cast<unsigned char>(c));
+            current_paragraph += line + " ";
         }
     }
-    
+    if (!current_paragraph.empty()) {
+        precleaned_paragraphs.push_back(current_paragraph);
+    }
 
-    sanitize_text(precleaned_text);
-    auto rigid_symbols = Preprocessor::find_rigid_symbols(precleaned_text, 1.5);
-    // Detach the punctuation from the edges
-    std::string cleaned_text = Preprocessor::apply_edge_splitting(precleaned_text, rigid_symbols);
+    // Apply the Space Crusher and Sanitize to each paragraph individually
+    std::string global_text_for_training = "";
+    for (auto& p : precleaned_paragraphs) {
+        std::string crushed = "";
+        bool in_space = false;
+        for (char c : p) {
+            if (std::isspace(static_cast<unsigned char>(c))) {
+                if (!in_space) { crushed += ' '; in_space = true; }
+            } else {
+                crushed += c; in_space = false;
+            }
+        }
+        sanitize_text(crushed);
+        p = crushed; // Save back to the vector
+        global_text_for_training += p + " "; // Stitch for the BPE phase
+    }
 
-    std::cout << "Training tokenizer on " << cleaned_text.size() << " bytes of text..." << std::endl;
-    
-    // 1. Train BPE Vocabulary
+    // =========================================================
+    // PHASE 2: GLOBAL TRAINING (Entropy & BPE)
+    // =========================================================
+    std::cout << "Calculating entropy for rigid symbols..." << std::endl;
+    auto rigid_symbols = Preprocessor::find_rigid_symbols(global_text_for_training, 1.5);
+    std::string global_cleaned_text = Preprocessor::apply_edge_splitting(global_text_for_training, rigid_symbols);
+
+    std::cout << "Training BPE Tokenizer on " << global_cleaned_text.size() << " bytes..." << std::endl;
     BPETokenizer tokenizer;
-    tokenizer.train_from_text(cleaned_text, 0.50);
-    
-    // 2. Translate text into BPE Tokens
-    std::cout << "Translating text into BPE subwords..." << std::endl;
-    std::vector<std::string> bpe_tokens = build_training_sequence(cleaned_text, tokenizer);
+    tokenizer.train_from_text(global_cleaned_text, 0.50);
 
-    // 3. Train the N-gram Engine
-    std::cout << "Training N-gram Engine on " << bpe_tokens.size() << " tokens..." << std::endl;
+    // =========================================================
+    // PHASE 3: STREAMING N-GRAM OBSERVATION
+    // =========================================================
+    std::cout << "Building fast lookup matrix..." << std::endl;
+    std::unordered_map<std::string, std::list<std::string>> fast_lookup;
+    for (const auto& vw : tokenizer.get_dictionary()) {
+        std::string original_word = "";
+        for (const auto& t : vw.tokens) { original_word += t; }
+        fast_lookup[original_word] = vw.tokens;
+    }
+
+    std::cout << "Streaming paragraphs into N-gram Engine..." << std::endl;
     NgramEngine engine(4);
+    int total_dropped_words = 0; // Initialize global counter
 
-    // --- NEW: The Control Panel for Training ---
-    TrainingParams t_params;
-    t_params.enable_pruning = true;
-    t_params.prune_low_freq = 0.00005; // You can adjust your typo filter here!
-    t_params.prune_high_freq = 0.01;   // You can adjust your grammar glitch filter here!
+    for (const auto& paragraph : precleaned_paragraphs) {
+        std::string final_p = Preprocessor::apply_edge_splitting(paragraph, rigid_symbols);
+        
+        // Pass the counter here!
+        std::vector<std::string> bpe_tokens = build_training_sequence(final_p, fast_lookup, total_dropped_words);
 
-    // Pass the config struct into the engine
-    engine.train(bpe_tokens, t_params);
+        if (!bpe_tokens.empty()) {
+            engine.observe_text(bpe_tokens);
+        }
+    }
+
+    // Print once at the end
+    if (total_dropped_words > 0) {
+        std::cerr << "Warning: " << total_dropped_words << " words dropped during paragraph streaming.\n";
+    }
+
+    // =========================================================
+    // PHASE 4: COMPILATION & EXPORT
+    // =========================================================
+    std::cout << "Compiling probability distributions..." << std::endl;
+    engine.compile_probabilities();
 
     std::cout << "Training complete. Saving to binary file..." << std::endl;
     if (engine.save_model(output_file)) {

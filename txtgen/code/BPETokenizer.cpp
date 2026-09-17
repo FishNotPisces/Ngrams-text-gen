@@ -25,46 +25,6 @@ std::list<std::string> BPETokenizer::split_to_utf8_list(const std::string& word)
     return tokens;
 }
 
-std::unordered_map<std::pair<std::string, std::string>, int, BPETokenizer::PairHash> 
-BPETokenizer::get_pair_counts() const {
-    std::unordered_map<std::pair<std::string, std::string>, int, PairHash> pair_counts;
-
-    for (const auto& word : dictionary) {
-        if (word.tokens.size() < 2) continue; 
-
-        auto it = word.tokens.begin();       
-        auto next_it = std::next(it);        
-
-        while (next_it != word.tokens.end()) {
-            std::pair<std::string, std::string> current_pair = {*it, *next_it};
-            pair_counts[current_pair] += word.frequency;
-            it++;
-            next_it++;
-        }
-    }
-    return pair_counts;
-}
-
-void BPETokenizer::merge_pair_in_dictionary(const std::pair<std::string, std::string>& target) {
-    for (auto& vw : dictionary) {
-        auto it = vw.tokens.begin();
-
-        while (it != vw.tokens.end()) {
-            auto next = std::next(it);
-            if (next == vw.tokens.end()) break;
-
-            if (*it == target.first && *next == target.second) {
-                *it += *next;
-                vw.tokens.erase(next);
-            } else {
-                ++it;
-            }
-        }
-    }
-}
-
-
-
 bool BPETokenizer::train_from_text(const std::string& text_buffer, double budget_ratio) {
     std::unordered_map<std::string, int> words_reader;
     std::istringstream stream(text_buffer);
@@ -116,7 +76,6 @@ bool BPETokenizer::train_from_text(const std::string& text_buffer, double budget
     // PHASE 3: THE FAST BPE LOOP
     // =========================================================
     int desired_merges = static_cast<int>(words_reader.size() * budget_ratio);
-    // You no longer need the 1500 hard cap! You can run all of them now.
     int num_merges = std::max(10, desired_merges); 
 
     std::cout << "Executing " << num_merges << " optimized BPE merges...\n";
@@ -162,7 +121,7 @@ const std::vector<BPETokenizer::VocabWord>& BPETokenizer::get_dictionary() const
 
 void BPETokenizer::surgical_merge(const std::pair<std::string, std::string>& best_pair) {
     // 1. Grab the list of words that actually contain this pair
-    auto words_to_update = pair_to_words[best_pair];
+    auto words_to_update = pair_to_words[best_pair]; // this is correctly copy: IMPORTANT this should not be reference
     
     // 2. The champion pair is being merged, so destroy its raw counts
     true_pair_counts[best_pair] = 0;

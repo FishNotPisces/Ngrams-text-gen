@@ -58,8 +58,6 @@ private:
     // Private helper functions (hidden from the user)
     size_t get_utf8_char_len(unsigned char c) const;
     std::list<std::string> split_to_utf8_list(const std::string& word) const;
-    std::unordered_map<std::pair<std::string, std::string>, int, PairHash> get_pair_counts() const;
-    void merge_pair_in_dictionary(const std::pair<std::string, std::string>& target);
     void surgical_merge(const std::pair<std::string, std::string>& best_pair);
 };
 
